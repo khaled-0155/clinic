@@ -1,0 +1,244 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  STAFF
+  DOCTOR
+}
+
+model User {
+  id       String  @id @default(uuid())
+  name     String
+  email    String  @unique
+  password String? @unique
+  role     Role
+
+  resetToken   String?   @unique
+  resetExpires DateTime?
+
+  isActive      Boolean   @default(true)
+  inviteToken   String?   @unique
+  inviteExpires DateTime?
+
+  // Branch (only for STAFF)
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id])
+
+  // Relations
+  doctorSchedules          DoctorSchedule[]
+  doctorScheduleExceptions DoctorScheduleException[]
+  appointments             Appointment[]
+  patientNotes PatientNote[]
+  transactions Transaction[] 
+
+  createdAt DateTime @default(now())
+}
+
+model Branch {
+  id      String  @id @default(uuid())
+  name    String  @unique
+  address String?
+
+  staff                    User[]
+  appointments             Appointment[]
+  doctorSchedules          DoctorSchedule[]
+  doctorScheduleExceptions DoctorScheduleException[]
+  transactions Transaction[] 
+}
+
+model Patient {
+  id    String  @id @default(uuid())
+  name  String
+  phone String
+
+  appointments Appointment[]
+  packages     PatientPackage[]
+  notes        PatientNote[]
+  transactions Transaction[]
+
+  createdAt DateTime @default(now())
+}
+
+model PatientNote {
+  id String @id @default(uuid())
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  createdById String
+  createdBy   User @relation(fields: [createdById], references: [id])
+
+  text String
+
+  createdAt DateTime @default(now())
+
+  @@index([patientId])
+}
+
+enum WeekDay {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+model DoctorSchedule {
+  id String @id @default(uuid())
+
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  weekDay WeekDay
+
+  startTime DateTime // only time part used
+  endTime   DateTime
+
+  isActive Boolean @default(true)
+
+  @@index([doctorId, branchId, weekDay])
+}
+
+model DoctorScheduleException {
+  id String @id @default(uuid())
+
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  date DateTime
+
+  isAvailable Boolean
+}
+
+enum AppointmentStatus {
+  BOOKED
+  COMPLETED
+  CANCELLED
+}
+
+model Appointment {
+  id String @id @default(uuid())
+
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  date      DateTime
+  startTime DateTime
+  endTime   DateTime
+
+  status AppointmentStatus @default(BOOKED)
+
+  packageId String?
+  package   PatientPackage? @relation(fields: [packageId], references: [id])
+
+  session Session?
+  transaction Transaction?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  doctorNotes String?
+  cancelReason String?
+  price Float?
+
+  @@unique([doctorId, date, startTime])
+  @@index([doctorId, date])
+  @@index([branchId, date])
+}
+
+model Package {
+  id            String  @id @default(uuid())
+  name          String  @unique
+  totalSessions Int
+  price         Float
+  isActive      Boolean @default(true)
+
+  patientPackages PatientPackage[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PatientPackage {
+  id String @id @default(uuid())
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  packageId String
+  package   Package @relation(fields: [packageId], references: [id])
+
+  usedSessions Int @default(0)
+
+  sessions     Session[]
+  appointments Appointment[]
+
+  createdAt DateTime @default(now())
+}
+
+model Session {
+  id String @id @default(uuid())
+
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  packageId String
+  package   PatientPackage @relation(fields: [packageId], references: [id])
+
+  createdAt DateTime @default(now())
+  
+  @@index([packageId])
+  }
+
+enum TransactionType {
+  PACKAGE
+  APPOINTMENT
+  EXPENSE
+}
+
+model Transaction {
+  id String @id @default(uuid())
+
+  type TransactionType
+
+  amount Float
+
+  appointmentId String? @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+  
+  branchId String?
+  branch   Branch? @relation(fields: [branchId], references: [id])
+
+  createdById String
+  createdBy   User @relation(fields: [createdById], references: [id])
+
+  patientId String?
+  patient   Patient? @relation(fields: [patientId], references: [id])
+
+  notes String?
+
+  createdAt DateTime @default(now())
+
+  @@index([branchId])
+}

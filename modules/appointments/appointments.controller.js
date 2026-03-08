@@ -1,0 +1,586 @@
+// controllers/appointments.controller.js
+const prisma = require("../../config/prisma");
+
+function setTimeOnDateUTC(dateOnly, timeSource) {
+  const d = new Date(dateOnly);
+
+  d.setUTCHours(timeSource.getUTCHours(), timeSource.getUTCMinutes(), 0, 0);
+  return d;
+}
+
+function isoDay(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+const getSlots = async (req, res) => {
+  try {
+    const { doctorId, branchId, date, includePast } = req.query;
+
+    if (!doctorId || !branchId || !date) {
+      return res
+        .status(400)
+        .json({ message: "doctorId, branchId and date are required" });
+    }
+
+    // Parse the requested day
+    const requestedDay = new Date(date);
+    requestedDay.setUTCHours(0, 0, 0, 0);
+
+    // compute weekday name matching your WeekDay enum
+    const weekdayNames = [
+      "SUNDAY",
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+    ];
+    const weekday = weekdayNames[requestedDay.getUTCDay()];
+
+    // Check exceptions for this doctor/branch + date
+    const exception = await prisma.doctorScheduleException.findFirst({
+      where: {
+        doctorId,
+        branchId,
+        date: requestedDay,
+      },
+    });
+
+    // If an exception exists and marks day unavailable -> return none
+    if (exception && exception.isAvailable === false) {
+      return res.json({ availabilityBlocks: [], slots: [] });
+    }
+
+    // Fetch all DoctorSchedule entries matching the weekday + doctor + branch
+    const schedules = await prisma.doctorSchedule.findMany({
+      where: {
+        doctorId,
+        branchId,
+        weekDay: weekday,
+        isActive: true,
+      },
+      orderBy: { startTime: "asc" },
+    });
+
+    if (!schedules.length) {
+      return res.json({ availabilityBlocks: [], slots: [] });
+    }
+
+    // Fetch appointments for the same doctor/branch/day (exclude CANCELLED)
+    const startOfDay = new Date(date);
+    startOfDay.setUTCHours(0, 0, 0, 0);
+
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+
+    const appointments = await prisma.appointment.findMany({
+      where: {
+        doctorId,
+        branchId,
+        date: {
+          gte: startOfDay,
+          lt: endOfDay,
+        },
+        status: { not: "CANCELLED" },
+      },
+      include: { patient: true },
+    });
+
+    const slotLengthMs = 30 * 60 * 1000;
+    const now = new Date();
+    const showPast = includePast === "true";
+
+    const slots = [];
+    const availabilityBlocks = [];
+
+    for (const sch of schedules) {
+      // Build availability block: copy the time-of-day from schedule onto requested date
+      const blockStart = setTimeOnDateUTC(
+        requestedDay,
+        new Date(sch.startTime),
+      );
+      const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
+
+      // skip degenerate blocks
+      if (blockEnd <= blockStart) continue;
+
+      availabilityBlocks.push({
+        id: sch.id,
+        startTime: blockStart.toISOString(),
+        endTime: blockEnd.toISOString(),
+      });
+
+      let slotStart = new Date(blockStart);
+      while (slotStart.getTime() + slotLengthMs <= blockEnd.getTime()) {
+        const slotEnd = new Date(slotStart.getTime() + slotLengthMs);
+
+        // Skip past slots unless requested
+        if (!showPast && slotEnd <= now) {
+          slotStart = slotEnd;
+          continue;
+        }
+
+        // Find overlapping appointment
+        let bookedAppt = null;
+        for (const appt of appointments) {
+          const apptStart = new Date(appt.startTime);
+          const apptEnd = new Date(appt.endTime);
+          // overlap test
+          if (apptStart < slotEnd && apptEnd > slotStart) {
+            bookedAppt = appt;
+            break;
+          }
+        }
+
+        slots.push({
+          doctorId,
+          branchId,
+          date: isoDay(requestedDay),
+          startTime: slotStart.toISOString(),
+          endTime: slotEnd.toISOString(),
+          status: bookedAppt ? "BOOKED" : "AVAILABLE",
+          appointment: bookedAppt
+            ? {
+                id: bookedAppt.id,
+                patientId: bookedAppt.patientId,
+                patientName: bookedAppt.patient?.name || null,
+                status: bookedAppt.status,
+              }
+            : null,
+        });
+
+        slotStart = slotEnd;
+      }
+    }
+
+    res.json({ availabilityBlocks, slots });
+  } catch (error) {
+    console.error("getSlots error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const createAppointment = async (req, res) => {
+  try {
+    const { doctorId, branchId, patientId, date, startTime, packageId, price } =
+      req.body;
+
+    const user = req.user;
+
+    // role checks
+    if (user.role === "STAFF" && user.branchId !== branchId)
+      return res
+        .status(403)
+        .json({ message: "Staff can only book in their branch" });
+
+    if (user.role === "DOCTOR" && user.id !== doctorId)
+      return res
+        .status(403)
+        .json({ message: "Doctor can only book for himself" });
+
+    // price validation
+    if (!packageId && (price === undefined || price === null)) {
+      return res
+        .status(400)
+        .json({ message: "Price is required for non-package appointment" });
+    }
+
+    // 30-minute rule
+    const start = new Date(startTime);
+    const minutes = start.getMinutes();
+
+    if (minutes !== 0 && minutes !== 30)
+      return res
+        .status(400)
+        .json({ message: "Invalid slot time (must be :00 or :30)" });
+
+    const end = new Date(start.getTime() + 30 * 60000);
+
+    // date-only
+    const requestedDay = new Date(date);
+    requestedDay.setUTCHours(0, 0, 0, 0);
+
+    // Check exception
+    const exception = await prisma.doctorScheduleException.findFirst({
+      where: { doctorId, branchId, date: requestedDay },
+    });
+
+    if (exception && exception.isAvailable === false) {
+      return res
+        .status(400)
+        .json({ message: "Doctor is unavailable on this date" });
+    }
+
+    // Find schedules for weekday
+    const weekdayNames = [
+      "SUNDAY",
+      "MONDAY",
+      "TUESDAY",
+      "WEDNESDAY",
+      "THURSDAY",
+      "FRIDAY",
+      "SATURDAY",
+    ];
+
+    const weekday = weekdayNames[requestedDay.getUTCDay()];
+
+    const schedules = await prisma.doctorSchedule.findMany({
+      where: {
+        doctorId,
+        branchId,
+        weekDay: weekday,
+        isActive: true,
+      },
+    });
+
+    if (!schedules.length) {
+      return res
+        .status(400)
+        .json({ message: "Doctor has no schedule on that weekday" });
+    }
+
+    // Check if slot inside schedule
+    let allowed = false;
+
+    for (const sch of schedules) {
+      const blockStart = setTimeOnDateUTC(
+        requestedDay,
+        new Date(sch.startTime),
+      );
+
+      const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
+
+      if (start >= blockStart && end <= blockEnd) {
+        allowed = true;
+        break;
+      }
+    }
+
+    if (!allowed) {
+      return res
+        .status(400)
+        .json({ message: "Slot outside availability range" });
+    }
+
+    // Prevent booking in the past
+    const now = new Date();
+
+    if (start < now)
+      return res.status(400).json({ message: "Cannot book past time slot" });
+
+    // Create appointment
+    try {
+      const appointment = await prisma.appointment.create({
+        data: {
+          doctorId,
+          branchId,
+          patientId,
+          date: requestedDay,
+          startTime: start,
+          endTime: end,
+          packageId: packageId || null,
+          price: packageId ? null : Number(price),
+        },
+      });
+
+      res.status(201).json(appointment);
+    } catch (err) {
+      if (err.code === "P2002") {
+        return res.status(400).json({ message: "Slot already booked" });
+      }
+
+      throw err;
+    }
+  } catch (error) {
+    console.error("Create appointment error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const updateAppointmentStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, doctorNotes, cancelReason } = req.body;
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+      include: {
+        package: true,
+        transaction: true,
+      },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    const updateData = {
+      status,
+    };
+
+    if (doctorNotes) updateData.doctorNotes = doctorNotes;
+    if (cancelReason) updateData.cancelReason = cancelReason;
+
+    const updated = await prisma.appointment.update({
+      where: { id },
+      data: updateData,
+    });
+
+    /**
+     * When appointment completed
+     */
+    if (status === "COMPLETED") {
+      // CASE 1 → PACKAGE SESSION
+      if (appointment.packageId) {
+        await prisma.$transaction([
+          prisma.session.create({
+            data: {
+              appointmentId: appointment.id,
+              packageId: appointment.packageId,
+            },
+          }),
+
+          prisma.patientPackage.update({
+            where: { id: appointment.packageId },
+            data: {
+              usedSessions: {
+                increment: 1,
+              },
+            },
+          }),
+        ]);
+      }
+
+      // CASE 2 → SINGLE APPOINTMENT PAYMENT
+      else if (!appointment.transaction) {
+        await prisma.transaction.create({
+          data: {
+            type: "APPOINTMENT",
+            amount: appointment.price || 0,
+            appointmentId: appointment.id,
+            patientId: appointment.patientId,
+            branchId: appointment.branchId,
+            createdById: req.user.id,
+          },
+        });
+      }
+    }
+
+    res.json(updated);
+  } catch (err) {
+    console.error("🔥 APPOINTMENT STATUS ERROR:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const completeAppointment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    await prisma.$transaction(async (tx) => {
+      const appointment = await tx.appointment.findUnique({
+        where: { id },
+        include: {
+          package: true,
+          session: true,
+        },
+      });
+
+      if (!appointment) throw new Error("Appointment not found");
+
+      // Doctor restriction
+      if (user.role === "DOCTOR" && appointment.doctorId !== user.id)
+        throw new Error("Not allowed");
+
+      if (appointment.status === "COMPLETED")
+        throw new Error("Already completed");
+
+      // If linked to package
+      if (appointment.packageId) {
+        if (!appointment.package) throw new Error("Package not found");
+
+        if (appointment.session) throw new Error("Session already created");
+
+        if (
+          appointment.package.usedSessions >= appointment.package.totalSessions
+        )
+          throw new Error("No remaining sessions in package");
+
+        // Create session FIRST
+        await tx.session.create({
+          data: {
+            appointmentId: id,
+            packageId: appointment.packageId,
+          },
+        });
+
+        // Then increment package safely
+        await tx.patientPackage.update({
+          where: { id: appointment.packageId },
+          data: {
+            usedSessions: { increment: 1 },
+          },
+        });
+      }
+
+      // Finally update appointment status
+      await tx.appointment.update({
+        where: { id },
+        data: { status: "COMPLETED" },
+      });
+    });
+
+    res.json({ message: "Appointment completed successfully" });
+  } catch (error) {
+    console.error("Complete appointment error:", error);
+    res.status(400).json({ message: error.message });
+  }
+};
+
+const cancelAppointment = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await prisma.appointment.update({
+      where: { id },
+      data: { status: "CANCELLED" },
+    });
+
+    res.json({ message: "Appointment cancelled" });
+  } catch (error) {
+    console.error("Cancel appointment error:", error);
+    console.error("🔥 LOGIN ERROR:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const getAppointments = async (req, res) => {
+  try {
+    const user = req.user;
+
+    let {
+      page = 1,
+      limit = 10,
+      status,
+      branchId,
+      doctorId,
+      patientId,
+      from,
+      to,
+      search,
+      sortBy = "createdAt",
+      order = "desc",
+    } = req.query;
+
+    page = parseInt(page);
+    limit = parseInt(limit);
+
+    const skip = (page - 1) * limit;
+
+    let where = {};
+
+    // 🔐 ROLE-BASED FILTERING
+    if (user.role === "DOCTOR") {
+      where.doctorId = user.id;
+    }
+
+    if (user.role === "STAFF") {
+      where.branchId = user.branchId;
+    }
+
+    if (user.role === "ADMIN") {
+      if (branchId) where.branchId = branchId;
+      if (doctorId) where.doctorId = doctorId;
+    }
+
+    // 🔎 Filters
+    if (status) where.status = status;
+    if (patientId) where.patientId = patientId;
+
+    if (from && to) {
+      where.date = {
+        gte: new Date(from),
+        lte: new Date(to),
+      };
+    }
+
+    // 🔍 Search by patient name
+    if (search) {
+      where.patient = {
+        name: {
+          contains: search,
+          mode: "insensitive",
+        },
+      };
+    }
+
+    const [appointments, total] = await Promise.all([
+      prisma.appointment.findMany({
+        where,
+
+        include: {
+          doctor: {
+            select: { id: true, name: true },
+          },
+
+          patient: {
+            select: { id: true, name: true, phone: true },
+          },
+
+          branch: {
+            select: { id: true, name: true },
+          },
+
+          package: {
+            select: {
+              id: true,
+              package: {
+                select: { name: true },
+              },
+            },
+          },
+
+          transaction: {
+            select: {
+              id: true,
+              amount: true,
+            },
+          },
+        },
+
+        orderBy: {
+          [sortBy]: order === "desc" ? "desc" : "asc",
+        },
+
+        skip,
+        take: limit,
+      }),
+
+      prisma.appointment.count({ where }),
+    ]);
+
+    res.json({
+      data: appointments,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Get appointments error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+module.exports = {
+  createAppointment,
+  completeAppointment,
+  cancelAppointment,
+  getSlots,
+  getAppointments,
+  updateAppointmentStatus,
+};
