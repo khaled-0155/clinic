@@ -155,14 +155,42 @@ const deletePatient = async (req, res) => {
   try {
     const { id } = req.params;
 
-    await prisma.patient.delete({
+    // Check if patient has appointments or packages
+    const patientRelations = await prisma.patient.findUnique({
       where: { id },
+      select: {
+        appointments: { select: { id: true } },
+        packages: { select: { id: true } },
+      },
     });
 
-    res.json({ message: "Patient deleted" });
+    if (!patientRelations) {
+      return res.status(404).json({ message: "Patient not found" });
+    }
+
+    if (
+      patientRelations.appointments.length > 0 ||
+      patientRelations.packages.length > 0
+    ) {
+      return res.status(400).json({
+        message: "Cannot delete patient with existing appointments or packages",
+      });
+    }
+
+    // Delete notes then patient
+    await prisma.$transaction([
+      prisma.patientNote.deleteMany({
+        where: { patientId: id },
+      }),
+
+      prisma.patient.delete({
+        where: { id },
+      }),
+    ]);
+
+    res.json({ message: "Patient deleted successfully" });
   } catch (error) {
     console.error("Delete patient error:", error);
-    console.error("🔥 LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
