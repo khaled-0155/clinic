@@ -155,10 +155,6 @@ const deletePatient = async (req, res) => {
   try {
     const { id } = req.params;
 
-    if (req.user.role !== "ADMIN") {
-      return res.status(403).json({ message: "Only admin can delete" });
-    }
-
     await prisma.patient.delete({
       where: { id },
     });
