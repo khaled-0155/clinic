@@ -11,13 +11,26 @@ const createPatient = async (req, res) => {
     }
 
     const patient = await prisma.patient.create({
-      data: { name, phone, notes },
+      data: {
+        name,
+        phone,
+      },
     });
+
+    // create first note if provided
+    if (notes) {
+      await prisma.patientNote.create({
+        data: {
+          patientId: patient.id,
+          createdById: req.user.id,
+          text: notes,
+        },
+      });
+    }
 
     res.status(201).json(patient);
   } catch (error) {
     console.error("Create patient error:", error);
-    console.error("🔥 LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 };
