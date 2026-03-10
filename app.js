@@ -33,5 +33,9 @@ app.use(
   require("./modules/transactions/transactions.routes"),
 );
 app.use("/api/dashboard", require("./modules/dashboard/dashboard.routes"));
+app.use(
+  "/api/medical-records",
+  require("./modules/medicalRecord/medicalRecord.routes"),
+);
 
 module.exports = app;

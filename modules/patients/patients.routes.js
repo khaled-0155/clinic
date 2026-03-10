@@ -14,6 +14,7 @@ const {
   getPatientSessions,
   getPatientAppointments,
   getPatientPackages,
+  getPatientProgress,
 } = require("./patients.controller");
 
 router.use(auth);
@@ -31,5 +32,6 @@ router.delete("/:id/notes/:noteId", deletePatientNote);
 router.get("/:id/appointments", getPatientAppointments);
 router.get("/:id/sessions", getPatientSessions);
 router.get("/:id/packages", getPatientPackages);
+router.get("/:id/progress", getPatientProgress);
 
 module.exports = router;

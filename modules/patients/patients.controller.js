@@ -276,15 +276,32 @@ const getPatientAppointments = async (req, res) => {
 
     const appointments = await prisma.appointment.findMany({
       where: { patientId: id },
+
       include: {
-        doctor: { select: { id: true, name: true } },
-        branch: { select: { id: true, name: true } },
+        doctor: {
+          select: { id: true, name: true },
+        },
+
+        branch: {
+          select: { id: true, name: true },
+        },
+
         package: {
           include: {
             package: true,
           },
         },
+
+        medicalRecord: {},
+        progress: {
+          include: {
+            doctor: {
+              select: { id: true, name: true },
+            },
+          },
+        },
       },
+
       orderBy: {
         date: "desc",
       },
@@ -383,6 +400,67 @@ const getPatientPackages = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
+
+const getPatientProgress = async (req, res) => {
+  try {
+    const { patientId } = req.params;
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 5;
+
+    const skip = (page - 1) * limit;
+
+    const [progress, total] = await Promise.all([
+      prisma.medicalProgress.findMany({
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+
+        include: {
+          doctor: {
+            select: { id: true, name: true },
+          },
+
+          appointment: {
+            select: {
+              id: true,
+              date: true,
+              status: true,
+              patientId: true,
+            },
+          },
+        },
+
+        where: {
+          appointment: {
+            patientId,
+          },
+        },
+      }),
+
+      prisma.medicalProgress.count({
+        where: {
+          appointment: {
+            patientId,
+          },
+        },
+      }),
+    ]);
+
+    res.json({
+      data: progress,
+      pagination: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Get patient progress error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
 module.exports = {
   createPatient,
   getPatients,
@@ -395,4 +473,5 @@ module.exports = {
   getPatientAppointments,
   getPatientSessions,
   getPatientPackages,
+  getPatientProgress,
 };

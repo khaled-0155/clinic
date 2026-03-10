@@ -548,6 +548,14 @@ const getAppointments = async (req, res) => {
               amount: true,
             },
           },
+
+          // ✅ Add diagnosis
+          medicalRecord: {
+            select: {
+              id: true,
+              diagnosis: true,
+            },
+          },
         },
 
         orderBy: {
@@ -576,6 +584,196 @@ const getAppointments = async (req, res) => {
   }
 };
 
+const getAppointmentById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+
+      include: {
+        doctor: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+
+        patient: {
+          select: {
+            id: true,
+            name: true,
+            phone: true,
+            createdAt: true,
+          },
+        },
+
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            address: true,
+          },
+        },
+
+        package: {
+          select: {
+            id: true,
+            usedSessions: true,
+            package: {
+              select: {
+                id: true,
+                name: true,
+                totalSessions: true,
+                price: true,
+              },
+            },
+          },
+        },
+
+        session: {
+          select: {
+            id: true,
+            createdAt: true,
+          },
+        },
+
+        transaction: {
+          select: {
+            id: true,
+            amount: true,
+            createdAt: true,
+          },
+        },
+
+        medicalRecord: {
+          select: {
+            id: true,
+            diagnosis: true,
+            treatment: true,
+            prescription: true,
+            notes: true,
+            createdAt: true,
+          },
+        },
+        progress: {
+          include: {
+            doctor: {
+              select: { id: true, name: true },
+            },
+          },
+        },
+      },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        message: "Appointment not found",
+      });
+    }
+
+    // 🔐 ROLE SECURITY
+    if (user.role === "DOCTOR" && appointment.doctorId !== user.id) {
+      return res.status(403).json({
+        message: "Forbidden",
+      });
+    }
+
+    if (user.role === "STAFF" && appointment.branchId !== user.branchId) {
+      return res.status(403).json({
+        message: "Forbidden",
+      });
+    }
+
+    res.json(appointment);
+  } catch (error) {
+    console.error("Get appointment by id error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+const addAppointmentProgress = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { progressNote, painLevel, mobilityScore } = req.body;
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+      include: { progress: true },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    if (appointment.progress) {
+      return res
+        .status(400)
+        .json({ message: "Progress already exists for this appointment" });
+    }
+
+    const progress = await prisma.medicalProgress.create({
+      data: {
+        appointmentId: id,
+        doctorId: req.user.id,
+        progressNote,
+        painLevel,
+        mobilityScore,
+      },
+    });
+
+    res.json(progress);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+const updateAppointmentProgress = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { progressNote, painLevel, mobilityScore } = req.body;
+
+    const progress = await prisma.medicalProgress.update({
+      where: { appointmentId: id },
+      data: {
+        progressNote,
+        painLevel,
+        mobilityScore,
+      },
+    });
+
+    res.json(progress);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+const getAppointmentProgress = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const progress = await prisma.medicalProgress.findUnique({
+      where: { appointmentId: id },
+      include: {
+        doctor: {
+          select: { id: true, name: true },
+        },
+      },
+    });
+
+    res.json(progress);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 module.exports = {
   createAppointment,
   completeAppointment,
@@ -583,4 +781,8 @@ module.exports = {
   getSlots,
   getAppointments,
   updateAppointmentStatus,
+  getAppointmentById,
+  addAppointmentProgress,
+  updateAppointmentProgress,
+  getAppointmentProgress,
 };

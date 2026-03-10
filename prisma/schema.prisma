@@ -35,8 +35,10 @@ model User {
   doctorSchedules          DoctorSchedule[]
   doctorScheduleExceptions DoctorScheduleException[]
   appointments             Appointment[]
-  patientNotes PatientNote[]
-  transactions Transaction[] 
+  patientNotes             PatientNote[]
+  transactions             Transaction[]
+  medicalRecords           MedicalRecord[]
+  progressNotes            MedicalProgress[]
 
   createdAt DateTime @default(now())
 }
@@ -50,11 +52,11 @@ model Branch {
   appointments             Appointment[]
   doctorSchedules          DoctorSchedule[]
   doctorScheduleExceptions DoctorScheduleException[]
-  transactions Transaction[] 
+  transactions             Transaction[]
 }
 
 model Patient {
-  id    String  @id @default(uuid())
+  id    String @id @default(uuid())
   name  String
   phone String
 
@@ -62,6 +64,8 @@ model Patient {
   packages     PatientPackage[]
   notes        PatientNote[]
   transactions Transaction[]
+
+  medicalRecords MedicalRecord[]
 
   createdAt DateTime @default(now())
 }
@@ -73,7 +77,7 @@ model PatientNote {
   patient   Patient @relation(fields: [patientId], references: [id])
 
   createdById String
-  createdBy   User @relation(fields: [createdById], references: [id])
+  createdBy   User   @relation(fields: [createdById], references: [id])
 
   text String
 
@@ -152,15 +156,18 @@ model Appointment {
   packageId String?
   package   PatientPackage? @relation(fields: [packageId], references: [id])
 
-  session Session?
+  session     Session?
   transaction Transaction?
+  progress    MedicalProgress?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  doctorNotes String?
+  doctorNotes  String?
   cancelReason String?
-  price Float?
+  price        Float?
+
+  medicalRecord MedicalRecord?
 
   @@unique([doctorId, date, startTime])
   @@index([doctorId, date])
@@ -207,9 +214,9 @@ model Session {
   package   PatientPackage @relation(fields: [packageId], references: [id])
 
   createdAt DateTime @default(now())
-  
+
   @@index([packageId])
-  }
+}
 
 enum TransactionType {
   PACKAGE
@@ -224,14 +231,14 @@ model Transaction {
 
   amount Float
 
-  appointmentId String? @unique
+  appointmentId String?      @unique
   appointment   Appointment? @relation(fields: [appointmentId], references: [id])
-  
+
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id])
 
   createdById String
-  createdBy   User @relation(fields: [createdById], references: [id])
+  createdBy   User   @relation(fields: [createdById], references: [id])
 
   patientId String?
   patient   Patient? @relation(fields: [patientId], references: [id])
@@ -241,4 +248,46 @@ model Transaction {
   createdAt DateTime @default(now())
 
   @@index([branchId])
+}
+
+model MedicalRecord {
+  id String @id @default(uuid())
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id])
+
+  diagnosis    String?
+  treatment    String?
+  prescription String?
+  notes        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([patientId])
+  @@index([doctorId])
+}
+
+model MedicalProgress {
+  id String @id @default(uuid())
+
+  appointmentId String      @unique
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  doctorId String
+  doctor   User   @relation(fields: [doctorId], references: [id])
+
+  progressNote String?
+
+  painLevel     Int? // scale 1–10
+  mobilityScore Int? // improvement score
+
+  createdAt DateTime @default(now())
+
+  @@index([doctorId])
 }
