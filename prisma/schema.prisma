@@ -107,8 +107,9 @@ model DoctorSchedule {
 
   weekDay WeekDay
 
-  startTime DateTime // only time part used
+  startTime DateTime 
   endTime   DateTime
+  slotMinutes Int @default(30)
 
   isActive Boolean @default(true)
 
@@ -169,7 +170,7 @@ model Appointment {
 
   medicalRecord MedicalRecord?
 
-  @@unique([doctorId, date, startTime])
+  @@index([doctorId, date, startTime])
   @@index([doctorId, date])
   @@index([branchId, date])
 }

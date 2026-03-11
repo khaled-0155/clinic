@@ -2,7 +2,6 @@ const router = require("express").Router();
 const auth = require("../../middleware/auth.middleware");
 
 const {
-  // Appointment
   createAppointment,
   completeAppointment,
   cancelAppointment,
@@ -13,6 +12,7 @@ const {
   addAppointmentProgress,
   updateAppointmentProgress,
   getAppointmentProgress,
+  deleteAppointment,
 } = require("./appointments.controller");
 
 router.use(auth);
@@ -21,9 +21,10 @@ router.use(auth);
    📅 APPOINTMENTS
 ================================ */
 router.get("/", getAppointments);
-router.get("/:id", getAppointmentById);
-
 router.get("/slots", getSlots);
+router.get("/:id", getAppointmentById);
+router.delete("/:id", deleteAppointment);
+
 // Create appointment
 router.post("/", createAppointment);
 // Complete appointment

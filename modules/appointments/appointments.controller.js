@@ -22,11 +22,8 @@ const getSlots = async (req, res) => {
         .json({ message: "doctorId, branchId and date are required" });
     }
 
-    // Parse the requested day
-    const requestedDay = new Date(date);
-    requestedDay.setUTCHours(0, 0, 0, 0);
+    const requestedDay = new Date(`${date}T00:00:00Z`);
 
-    // compute weekday name matching your WeekDay enum
     const weekdayNames = [
       "SUNDAY",
       "MONDAY",
@@ -36,9 +33,10 @@ const getSlots = async (req, res) => {
       "FRIDAY",
       "SATURDAY",
     ];
+
     const weekday = weekdayNames[requestedDay.getUTCDay()];
 
-    // Check exceptions for this doctor/branch + date
+    // check exception
     const exception = await prisma.doctorScheduleException.findFirst({
       where: {
         doctorId,
@@ -47,12 +45,10 @@ const getSlots = async (req, res) => {
       },
     });
 
-    // If an exception exists and marks day unavailable -> return none
     if (exception && exception.isAvailable === false) {
       return res.json({ availabilityBlocks: [], slots: [] });
     }
 
-    // Fetch all DoctorSchedule entries matching the weekday + doctor + branch
     const schedules = await prisma.doctorSchedule.findMany({
       where: {
         doctorId,
@@ -67,10 +63,8 @@ const getSlots = async (req, res) => {
       return res.json({ availabilityBlocks: [], slots: [] });
     }
 
-    // Fetch appointments for the same doctor/branch/day (exclude CANCELLED)
-    const startOfDay = new Date(date);
-    startOfDay.setUTCHours(0, 0, 0, 0);
-
+    // appointments
+    const startOfDay = new Date(`${date}T00:00:00Z`);
     const endOfDay = new Date(startOfDay);
     endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
 
@@ -87,7 +81,6 @@ const getSlots = async (req, res) => {
       include: { patient: true },
     });
 
-    const slotLengthMs = 30 * 60 * 1000;
     const now = new Date();
     const showPast = includePast === "true";
 
@@ -95,14 +88,13 @@ const getSlots = async (req, res) => {
     const availabilityBlocks = [];
 
     for (const sch of schedules) {
-      // Build availability block: copy the time-of-day from schedule onto requested date
       const blockStart = setTimeOnDateUTC(
         requestedDay,
         new Date(sch.startTime),
       );
+
       const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
 
-      // skip degenerate blocks
       if (blockEnd <= blockStart) continue;
 
       availabilityBlocks.push({
@@ -111,22 +103,25 @@ const getSlots = async (req, res) => {
         endTime: blockEnd.toISOString(),
       });
 
+      // ⭐ dynamic slot duration
+      const slotLengthMs = (sch.slotMinutes || 30) * 60 * 1000;
+
       let slotStart = new Date(blockStart);
+
       while (slotStart.getTime() + slotLengthMs <= blockEnd.getTime()) {
         const slotEnd = new Date(slotStart.getTime() + slotLengthMs);
 
-        // Skip past slots unless requested
         if (!showPast && slotEnd <= now) {
           slotStart = slotEnd;
           continue;
         }
 
-        // Find overlapping appointment
         let bookedAppt = null;
+
         for (const appt of appointments) {
           const apptStart = new Date(appt.startTime);
           const apptEnd = new Date(appt.endTime);
-          // overlap test
+
           if (apptStart < slotEnd && apptEnd > slotStart) {
             bookedAppt = appt;
             break;
@@ -168,40 +163,30 @@ const createAppointment = async (req, res) => {
 
     const user = req.user;
 
-    // role checks
-    if (user.role === "STAFF" && user.branchId !== branchId)
+    // ROLE CHECKS
+    if (user.role === "STAFF" && user.branchId !== branchId) {
       return res
         .status(403)
         .json({ message: "Staff can only book in their branch" });
+    }
 
-    if (user.role === "DOCTOR" && user.id !== doctorId)
+    if (user.role === "DOCTOR" && user.id !== doctorId) {
       return res
         .status(403)
         .json({ message: "Doctor can only book for himself" });
+    }
 
-    // price validation
     if (!packageId && (price === undefined || price === null)) {
       return res
         .status(400)
         .json({ message: "Price is required for non-package appointment" });
     }
 
-    // 30-minute rule
     const start = new Date(startTime);
-    const minutes = start.getMinutes();
 
-    if (minutes !== 0 && minutes !== 30)
-      return res
-        .status(400)
-        .json({ message: "Invalid slot time (must be :00 or :30)" });
+    const requestedDay = new Date(`${date}T00:00:00Z`);
 
-    const end = new Date(start.getTime() + 30 * 60000);
-
-    // date-only
-    const requestedDay = new Date(date);
-    requestedDay.setUTCHours(0, 0, 0, 0);
-
-    // Check exception
+    // exception check
     const exception = await prisma.doctorScheduleException.findFirst({
       where: { doctorId, branchId, date: requestedDay },
     });
@@ -212,7 +197,7 @@ const createAppointment = async (req, res) => {
         .json({ message: "Doctor is unavailable on this date" });
     }
 
-    // Find schedules for weekday
+    // weekday
     const weekdayNames = [
       "SUNDAY",
       "MONDAY",
@@ -240,8 +225,8 @@ const createAppointment = async (req, res) => {
         .json({ message: "Doctor has no schedule on that weekday" });
     }
 
-    // Check if slot inside schedule
-    let allowed = false;
+    let selectedSchedule = null;
+    let slotMinutes = 30;
 
     for (const sch of schedules) {
       const blockStart = setTimeOnDateUTC(
@@ -251,25 +236,41 @@ const createAppointment = async (req, res) => {
 
       const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
 
-      if (start >= blockStart && end <= blockEnd) {
-        allowed = true;
+      if (start >= blockStart && start < blockEnd) {
+        selectedSchedule = sch;
+        slotMinutes = sch.slotMinutes || 30;
         break;
       }
     }
 
-    if (!allowed) {
+    if (!selectedSchedule) {
       return res
         .status(400)
         .json({ message: "Slot outside availability range" });
     }
 
-    // Prevent booking in the past
+    // validate slot alignment
+    const blockStart = setTimeOnDateUTC(
+      requestedDay,
+      new Date(selectedSchedule.startTime),
+    );
+
+    const diffMinutes = (start - blockStart) / 60000;
+
+    if (diffMinutes % slotMinutes !== 0) {
+      return res.status(400).json({
+        message: `Invalid slot. Must align with ${slotMinutes}-minute schedule`,
+      });
+    }
+
+    const end = new Date(start.getTime() + slotMinutes * 60000);
+
     const now = new Date();
 
-    if (start < now)
+    if (end <= now) {
       return res.status(400).json({ message: "Cannot book past time slot" });
+    }
 
-    // Create appointment
     try {
       const appointment = await prisma.appointment.create({
         data: {
@@ -774,6 +775,46 @@ const getAppointmentProgress = async (req, res) => {
   }
 };
 
+const deleteAppointment = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const appointment = await prisma.appointment.findUnique({
+      where: { id },
+      include: {
+        transaction: true,
+      },
+    });
+
+    if (!appointment) {
+      return res.status(404).json({ message: "Appointment not found" });
+    }
+
+    // Allow delete only if BOOKED or CANCELLED
+    if (!["BOOKED", "CANCELLED"].includes(appointment.status)) {
+      return res.status(400).json({
+        message: "Only booked or cancelled appointments can be deleted",
+      });
+    }
+
+    // Optional safety check (if transaction exists)
+    if (appointment.transaction) {
+      return res.status(400).json({
+        message: "Cannot delete appointment with transaction",
+      });
+    }
+
+    await prisma.appointment.delete({
+      where: { id },
+    });
+
+    res.json({ message: "Appointment deleted successfully" });
+  } catch (error) {
+    console.error("Delete appointment error:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
 module.exports = {
   createAppointment,
   completeAppointment,
@@ -785,4 +826,5 @@ module.exports = {
   addAppointmentProgress,
   updateAppointmentProgress,
   getAppointmentProgress,
+  deleteAppointment,
 };

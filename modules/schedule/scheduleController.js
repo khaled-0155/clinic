@@ -8,16 +8,6 @@ const {
   overlaps,
 } = require("../../utils/slots");
 
-const WEEKDAY_ENUM = {
-  monday: "MONDAY",
-  tuesday: "TUESDAY",
-  wednesday: "WEDNESDAY",
-  thursday: "THURSDAY",
-  friday: "FRIDAY",
-  saturday: "SATURDAY",
-  sunday: "SUNDAY",
-};
-
 async function createSchedule(req, res) {
   try {
     const {
@@ -26,6 +16,7 @@ async function createSchedule(req, res) {
       weekDay,
       startTime,
       endTime,
+      slotMinutes = 30,
       isActive = true,
     } = req.body;
 
@@ -42,6 +33,18 @@ async function createSchedule(req, res) {
     if (start >= end) {
       return res.status(400).json({
         message: "End time must be after start time",
+      });
+    }
+
+    if (slotMinutes < 5 || slotMinutes > 240) {
+      return res.status(400).json({
+        message: "slotMinutes must be between 5 and 240",
+      });
+    }
+
+    if (slotMinutes % 5 !== 0) {
+      return res.status(400).json({
+        message: "slotMinutes must be a multiple of 5",
       });
     }
 
@@ -74,6 +77,7 @@ async function createSchedule(req, res) {
         weekDay,
         startTime: start,
         endTime: end,
+        slotMinutes,
         isActive,
       },
     });
@@ -85,28 +89,6 @@ async function createSchedule(req, res) {
       message: "createSchedule error",
       error: err.message,
     });
-  }
-}
-
-async function updateSchedule(req, res) {
-  try {
-    const { id } = req.params;
-    const data = {};
-    const { startTime, endTime, isActive, weekDay } = req.body;
-    if (startTime) data.startTime = new Date(`1970-01-01T${startTime}:00Z`);
-    if (endTime) data.endTime = new Date(`1970-01-01T${endTime}:00Z`);
-    if (typeof isActive !== "undefined") data.isActive = isActive;
-    if (weekDay) data.weekDay = weekDay;
-    const updated = await prisma.doctorSchedule.update({
-      where: { id },
-      data,
-    });
-    return res.json(updated);
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "updateSchedule error", error: err.message });
   }
 }
 
@@ -163,78 +145,9 @@ async function listSchedulesForDoctor(req, res) {
   }
 }
 
-/* Exceptions CRUD */
-async function createException(req, res) {
-  try {
-    const { doctorId, branchId, date, isAvailable } = req.body;
-    if (!doctorId || !branchId || !date || typeof isAvailable === "undefined") {
-      return res
-        .status(400)
-        .json({ message: "doctorId, branchId, date, isAvailable required" });
-    }
-    const exception = await prisma.doctorScheduleException.create({
-      data: {
-        doctorId,
-        branchId,
-        date: new Date(`${date}T00:00:00.000Z`),
-        isAvailable,
-      },
-    });
-    return res.status(201).json(exception);
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "createException error", error: err.message });
-  }
-}
-
-async function updateException(req, res) {
-  try {
-    const { id } = req.params;
-    const data = {};
-    const { date, isAvailable } = req.body;
-    if (date) data.date = new Date(date);
-    if (typeof isAvailable !== "undefined") data.isAvailable = isAvailable;
-    const updated = await prisma.doctorScheduleException.update({
-      where: { id },
-      data,
-    });
-    return res.json(updated);
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "updateException error", error: err.message });
-  }
-}
-
-async function deleteException(req, res) {
-  try {
-    const { id } = req.params;
-    await prisma.doctorScheduleException.delete({ where: { id } });
-    return res.status(204).send();
-  } catch (err) {
-    console.error(err);
-    return res
-      .status(500)
-      .json({ message: "deleteException error", error: err.message });
-  }
-}
-
-/**
- * GET /slots?doctorId=...&branchId=...&date=YYYY-MM-DD&slotLength=30
- *
- * Steps:
- * 1. Find weekly schedules for the doctor's weekday.
- * 2. Check for doctorScheduleException for the date — if exists and isAvailable===false => return [].
- * 3. For each schedule, build slots (slotLength minutes).
- * 4. Fetch existing appointments for that doctor/branch/date and remove overlapping slots.
- * 5. Return slots with status 'available' | 'booked' and meta (start,end ISO).
- */
 async function getSlots(req, res) {
   try {
-    const { doctorId, branchId, date, slotLength = 30 } = req.query;
+    const { doctorId, branchId, date } = req.query;
     if (!doctorId || !branchId || !date) {
       return res
         .status(400)
@@ -295,7 +208,7 @@ async function getSlots(req, res) {
       const slots = generateSlotsBetween(
         slotStart,
         slotEnd,
-        Number(slotLength),
+        s.slotMinutes || 30,
       );
       candidateSlots = candidateSlots.concat(slots);
     }
@@ -344,6 +257,86 @@ async function getSlots(req, res) {
     return res
       .status(500)
       .json({ message: "getSlots error", error: err.message });
+  }
+}
+
+async function updateSchedule(req, res) {
+  try {
+    const { id } = req.params;
+    const data = {};
+    const { startTime, endTime, isActive, weekDay } = req.body;
+    if (startTime) data.startTime = new Date(`1970-01-01T${startTime}:00Z`);
+    if (endTime) data.endTime = new Date(`1970-01-01T${endTime}:00Z`);
+    if (typeof isActive !== "undefined") data.isActive = isActive;
+    if (weekDay) data.weekDay = weekDay;
+    const updated = await prisma.doctorSchedule.update({
+      where: { id },
+      data,
+    });
+    return res.json(updated);
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "updateSchedule error", error: err.message });
+  }
+}
+/* Exceptions CRUD */
+async function createException(req, res) {
+  try {
+    const { doctorId, branchId, date, isAvailable } = req.body;
+    if (!doctorId || !branchId || !date || typeof isAvailable === "undefined") {
+      return res
+        .status(400)
+        .json({ message: "doctorId, branchId, date, isAvailable required" });
+    }
+    const exception = await prisma.doctorScheduleException.create({
+      data: {
+        doctorId,
+        branchId,
+        date: new Date(`${date}T00:00:00.000Z`),
+        isAvailable,
+      },
+    });
+    return res.status(201).json(exception);
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "createException error", error: err.message });
+  }
+}
+
+async function updateException(req, res) {
+  try {
+    const { id } = req.params;
+    const data = {};
+    const { date, isAvailable } = req.body;
+    if (date) data.date = new Date(date);
+    if (typeof isAvailable !== "undefined") data.isAvailable = isAvailable;
+    const updated = await prisma.doctorScheduleException.update({
+      where: { id },
+      data,
+    });
+    return res.json(updated);
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "updateException error", error: err.message });
+  }
+}
+
+async function deleteException(req, res) {
+  try {
+    const { id } = req.params;
+    await prisma.doctorScheduleException.delete({ where: { id } });
+    return res.status(204).send();
+  } catch (err) {
+    console.error(err);
+    return res
+      .status(500)
+      .json({ message: "deleteException error", error: err.message });
   }
 }
 
