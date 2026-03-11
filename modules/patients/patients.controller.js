@@ -323,17 +323,39 @@ const getPatientAppointments = async (req, res) => {
             },
           },
         },
+
+        slots: {
+          include: {
+            slot: true,
+          },
+          orderBy: {
+            slot: {
+              startTime: "asc",
+            },
+          },
+        },
       },
 
-      orderBy: [{ date: "desc" }, { startTime: "desc" }],
+      orderBy: {
+        date: "desc",
+      },
     });
 
     const data = appointments.map((a) => {
-      const durationMinutes =
-        (new Date(a.endTime) - new Date(a.startTime)) / 60000;
+      const firstSlot = a.slots?.[0]?.slot;
+      const lastSlot = a.slots?.[a.slots.length - 1]?.slot;
+
+      let durationMinutes = null;
+
+      if (firstSlot && lastSlot) {
+        durationMinutes =
+          (new Date(lastSlot.endTime) - new Date(firstSlot.startTime)) / 60000;
+      }
 
       return {
         ...a,
+        startTime: firstSlot?.startTime || null,
+        endTime: lastSlot?.endTime || null,
         durationMinutes,
       };
     });
