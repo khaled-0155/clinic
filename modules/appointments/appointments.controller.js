@@ -36,7 +36,7 @@ const getSlots = async (req, res) => {
 
     const weekday = weekdayNames[requestedDay.getUTCDay()];
 
-    // check exception
+    // Exception check
     const exception = await prisma.doctorScheduleException.findFirst({
       where: {
         doctorId,
@@ -63,7 +63,6 @@ const getSlots = async (req, res) => {
       return res.json({ availabilityBlocks: [], slots: [] });
     }
 
-    // appointments
     const startOfDay = new Date(`${date}T00:00:00Z`);
     const endOfDay = new Date(startOfDay);
     endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
@@ -80,6 +79,13 @@ const getSlots = async (req, res) => {
       },
       include: { patient: true },
     });
+
+    // Precompute appointment intervals
+    const appointmentIntervals = appointments.map((a) => ({
+      start: new Date(a.startTime),
+      end: new Date(a.endTime),
+      data: a,
+    }));
 
     const now = new Date();
     const showPast = includePast === "true";
@@ -103,7 +109,6 @@ const getSlots = async (req, res) => {
         endTime: blockEnd.toISOString(),
       });
 
-      // ⭐ dynamic slot duration
       const slotLengthMs = (sch.slotMinutes || 30) * 60 * 1000;
 
       let slotStart = new Date(blockStart);
@@ -118,12 +123,9 @@ const getSlots = async (req, res) => {
 
         let bookedAppt = null;
 
-        for (const appt of appointments) {
-          const apptStart = new Date(appt.startTime);
-          const apptEnd = new Date(appt.endTime);
-
-          if (apptStart < slotEnd && apptEnd > slotStart) {
-            bookedAppt = appt;
+        for (const appt of appointmentIntervals) {
+          if (appt.start < slotEnd && appt.end > slotStart) {
+            bookedAppt = appt.data;
             break;
           }
         }
@@ -141,6 +143,8 @@ const getSlots = async (req, res) => {
                 patientId: bookedAppt.patientId,
                 patientName: bookedAppt.patient?.name || null,
                 status: bookedAppt.status,
+                startTime: bookedAppt.startTime,
+                endTime: bookedAppt.endTime,
               }
             : null,
         });
@@ -158,10 +162,21 @@ const getSlots = async (req, res) => {
 
 const createAppointment = async (req, res) => {
   try {
-    const { doctorId, branchId, patientId, date, startTime, packageId, price } =
-      req.body;
+    const {
+      doctorId,
+      branchId,
+      patientId,
+      date,
+      slotStarts,
+      packageId,
+      price,
+    } = req.body;
 
     const user = req.user;
+
+    if (!slotStarts || !Array.isArray(slotStarts) || slotStarts.length === 0) {
+      return res.status(400).json({ message: "No slots selected" });
+    }
 
     // ROLE CHECKS
     if (user.role === "STAFF" && user.branchId !== branchId) {
@@ -182,11 +197,8 @@ const createAppointment = async (req, res) => {
         .json({ message: "Price is required for non-package appointment" });
     }
 
-    const start = new Date(startTime);
-
     const requestedDay = new Date(`${date}T00:00:00Z`);
 
-    // exception check
     const exception = await prisma.doctorScheduleException.findFirst({
       where: { doctorId, branchId, date: requestedDay },
     });
@@ -197,7 +209,6 @@ const createAppointment = async (req, res) => {
         .json({ message: "Doctor is unavailable on this date" });
     }
 
-    // weekday
     const weekdayNames = [
       "SUNDAY",
       "MONDAY",
@@ -225,6 +236,11 @@ const createAppointment = async (req, res) => {
         .json({ message: "Doctor has no schedule on that weekday" });
     }
 
+    // convert slotStarts to Date
+    const slots = slotStarts.map((s) => new Date(s)).sort((a, b) => a - b);
+
+    const firstSlot = slots[0];
+
     let selectedSchedule = null;
     let slotMinutes = 30;
 
@@ -236,7 +252,7 @@ const createAppointment = async (req, res) => {
 
       const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
 
-      if (start >= blockStart && start < blockEnd) {
+      if (firstSlot >= blockStart && firstSlot < blockEnd) {
         selectedSchedule = sch;
         slotMinutes = sch.slotMinutes || 30;
         break;
@@ -246,24 +262,39 @@ const createAppointment = async (req, res) => {
     if (!selectedSchedule) {
       return res
         .status(400)
-        .json({ message: "Slot outside availability range" });
+        .json({ message: "Slots outside schedule availability" });
     }
 
-    // validate slot alignment
+    // Validate slot alignment + consecutive slots
     const blockStart = setTimeOnDateUTC(
       requestedDay,
       new Date(selectedSchedule.startTime),
     );
 
-    const diffMinutes = (start - blockStart) / 60000;
+    for (let i = 0; i < slots.length; i++) {
+      const diff = (slots[i] - blockStart) / 60000;
 
-    if (diffMinutes % slotMinutes !== 0) {
-      return res.status(400).json({
-        message: `Invalid slot. Must align with ${slotMinutes}-minute schedule`,
-      });
+      if (diff % slotMinutes !== 0) {
+        return res.status(400).json({
+          message: `Invalid slot alignment (${slotMinutes} minutes required)`,
+        });
+      }
+
+      if (i > 0) {
+        const gap = (slots[i] - slots[i - 1]) / 60000;
+
+        if (gap !== slotMinutes) {
+          return res.status(400).json({
+            message: "Slots must be consecutive",
+          });
+        }
+      }
     }
 
-    const end = new Date(start.getTime() + slotMinutes * 60000);
+    const start = slots[0];
+    const end = new Date(
+      slots[slots.length - 1].getTime() + slotMinutes * 60000,
+    );
 
     const now = new Date();
 
@@ -271,28 +302,38 @@ const createAppointment = async (req, res) => {
       return res.status(400).json({ message: "Cannot book past time slot" });
     }
 
-    try {
-      const appointment = await prisma.appointment.create({
-        data: {
-          doctorId,
-          branchId,
-          patientId,
-          date: requestedDay,
-          startTime: start,
-          endTime: end,
-          packageId: packageId || null,
-          price: packageId ? null : Number(price),
-        },
+    // Check overlapping appointments
+    const overlapping = await prisma.appointment.findFirst({
+      where: {
+        doctorId,
+        branchId,
+        date: requestedDay,
+        status: { not: "CANCELLED" },
+        startTime: { lt: end },
+        endTime: { gt: start },
+      },
+    });
+
+    if (overlapping) {
+      return res.status(400).json({
+        message: "One or more slots already booked",
       });
-
-      res.status(201).json(appointment);
-    } catch (err) {
-      if (err.code === "P2002") {
-        return res.status(400).json({ message: "Slot already booked" });
-      }
-
-      throw err;
     }
+
+    const appointment = await prisma.appointment.create({
+      data: {
+        doctorId,
+        branchId,
+        patientId,
+        date: requestedDay,
+        startTime: start,
+        endTime: end,
+        packageId: packageId || null,
+        price: packageId ? null : Number(price),
+      },
+    });
+
+    res.status(201).json(appointment);
   } catch (error) {
     console.error("Create appointment error:", error);
     res.status(500).json({ message: "Server error" });
@@ -475,14 +516,14 @@ const getAppointments = async (req, res) => {
       order = "desc",
     } = req.query;
 
-    page = parseInt(page);
-    limit = parseInt(limit);
+    page = Math.max(parseInt(page) || 1, 1);
+    limit = Math.min(parseInt(limit) || 10, 100);
 
     const skip = (page - 1) * limit;
 
-    let where = {};
+    const where = {};
 
-    // 🔐 ROLE-BASED FILTERING
+    // ROLE FILTER
     if (user.role === "DOCTOR") {
       where.doctorId = user.id;
     }
@@ -496,18 +537,25 @@ const getAppointments = async (req, res) => {
       if (doctorId) where.doctorId = doctorId;
     }
 
-    // 🔎 Filters
     if (status) where.status = status;
     if (patientId) where.patientId = patientId;
 
-    if (from && to) {
-      where.date = {
-        gte: new Date(from),
-        lte: new Date(to),
-      };
+    // Date range
+    if (from || to) {
+      const dateFilter = {};
+
+      if (from) dateFilter.gte = new Date(`${from}T00:00:00Z`);
+
+      if (to) {
+        const end = new Date(`${to}T00:00:00Z`);
+        end.setUTCDate(end.getUTCDate() + 1);
+        dateFilter.lt = end;
+      }
+
+      where.date = dateFilter;
     }
 
-    // 🔍 Search by patient name
+    // Search patient
     if (search) {
       where.patient = {
         name: {
@@ -517,22 +565,20 @@ const getAppointments = async (req, res) => {
       };
     }
 
+    // Safe sorting
+    const allowedSort = ["createdAt", "date", "startTime", "status"];
+    if (!allowedSort.includes(sortBy)) sortBy = "createdAt";
+
     const [appointments, total] = await Promise.all([
       prisma.appointment.findMany({
         where,
 
         include: {
-          doctor: {
-            select: { id: true, name: true },
-          },
+          doctor: { select: { id: true, name: true } },
 
-          patient: {
-            select: { id: true, name: true, phone: true },
-          },
+          patient: { select: { id: true, name: true, phone: true } },
 
-          branch: {
-            select: { id: true, name: true },
-          },
+          branch: { select: { id: true, name: true } },
 
           package: {
             select: {
@@ -550,7 +596,6 @@ const getAppointments = async (req, res) => {
             },
           },
 
-          // ✅ Add diagnosis
           medicalRecord: {
             select: {
               id: true,
@@ -560,7 +605,7 @@ const getAppointments = async (req, res) => {
         },
 
         orderBy: {
-          [sortBy]: order === "desc" ? "desc" : "asc",
+          [sortBy]: order === "asc" ? "asc" : "desc",
         },
 
         skip,
@@ -570,8 +615,18 @@ const getAppointments = async (req, res) => {
       prisma.appointment.count({ where }),
     ]);
 
+    const data = appointments.map((a) => {
+      const durationMinutes =
+        (new Date(a.endTime) - new Date(a.startTime)) / 60000;
+
+      return {
+        ...a,
+        durationMinutes,
+      };
+    });
+
     res.json({
-      data: appointments,
+      data,
       meta: {
         total,
         page,
@@ -659,6 +714,7 @@ const getAppointmentById = async (req, res) => {
             createdAt: true,
           },
         },
+
         progress: {
           include: {
             doctor: {
@@ -675,20 +731,22 @@ const getAppointmentById = async (req, res) => {
       });
     }
 
-    // 🔐 ROLE SECURITY
+    // ROLE SECURITY
     if (user.role === "DOCTOR" && appointment.doctorId !== user.id) {
-      return res.status(403).json({
-        message: "Forbidden",
-      });
+      return res.status(403).json({ message: "Forbidden" });
     }
 
     if (user.role === "STAFF" && appointment.branchId !== user.branchId) {
-      return res.status(403).json({
-        message: "Forbidden",
-      });
+      return res.status(403).json({ message: "Forbidden" });
     }
 
-    res.json(appointment);
+    const durationMinutes =
+      (new Date(appointment.endTime) - new Date(appointment.startTime)) / 60000;
+
+    res.json({
+      ...appointment,
+      durationMinutes,
+    });
   } catch (error) {
     console.error("Get appointment by id error:", error);
     res.status(500).json({ message: "Server error" });

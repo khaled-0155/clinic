@@ -39,6 +39,7 @@ model User {
   transactions             Transaction[]
   medicalRecords           MedicalRecord[]
   progressNotes            MedicalProgress[]
+  slots Slot[] 
 
   createdAt DateTime @default(now())
 }
@@ -53,6 +54,7 @@ model Branch {
   doctorSchedules          DoctorSchedule[]
   doctorScheduleExceptions DoctorScheduleException[]
   transactions             Transaction[]
+  slots Slot[] 
 }
 
 model Patient {
@@ -74,7 +76,7 @@ model PatientNote {
   id String @id @default(uuid())
 
   patientId String
-  patient   Patient @relation(fields: [patientId], references: [id])
+  patient   Patient @relation(fields: [patientId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   createdById String
   createdBy   User   @relation(fields: [createdById], references: [id])
@@ -149,8 +151,7 @@ model Appointment {
   patient   Patient @relation(fields: [patientId], references: [id])
 
   date      DateTime
-  startTime DateTime
-  endTime   DateTime
+  slots AppointmentSlot[]
 
   status AppointmentStatus @default(BOOKED)
 
@@ -170,9 +171,39 @@ model Appointment {
 
   medicalRecord MedicalRecord?
 
-  @@index([doctorId, date, startTime])
   @@index([doctorId, date])
   @@index([branchId, date])
+}
+
+model AppointmentSlot {
+  id String @id @default(uuid())
+
+  appointmentId String
+  appointment   Appointment @relation(fields: [appointmentId], references: [id])
+
+  slotId String
+  slot   Slot @relation(fields: [slotId], references: [id])
+
+  @@unique([slotId]) // prevents double booking
+}
+
+model Slot {
+  id String @id @default(uuid())
+
+  doctorId String
+  doctor   User @relation(fields: [doctorId], references: [id])
+
+  branchId String
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  date DateTime
+
+  startTime DateTime
+  endTime   DateTime
+
+  appointmentSlots AppointmentSlot[]
+
+  @@unique([doctorId, startTime])
 }
 
 model Package {

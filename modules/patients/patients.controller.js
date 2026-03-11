@@ -273,9 +273,16 @@ const deletePatientNote = async (req, res) => {
 const getPatientAppointments = async (req, res) => {
   try {
     const { id } = req.params;
+    const { status } = req.query;
+
+    const where = { patientId: id };
+
+    if (status) {
+      where.status = status;
+    }
 
     const appointments = await prisma.appointment.findMany({
-      where: { patientId: id },
+      where,
 
       include: {
         doctor: {
@@ -288,11 +295,27 @@ const getPatientAppointments = async (req, res) => {
 
         package: {
           include: {
-            package: true,
+            package: {
+              select: {
+                id: true,
+                name: true,
+                totalSessions: true,
+                price: true,
+              },
+            },
           },
         },
 
-        medicalRecord: {},
+        medicalRecord: {
+          select: {
+            id: true,
+            diagnosis: true,
+            treatment: true,
+            prescription: true,
+            createdAt: true,
+          },
+        },
+
         progress: {
           include: {
             doctor: {
@@ -302,12 +325,20 @@ const getPatientAppointments = async (req, res) => {
         },
       },
 
-      orderBy: {
-        date: "desc",
-      },
+      orderBy: [{ date: "desc" }, { startTime: "desc" }],
     });
 
-    res.json(appointments);
+    const data = appointments.map((a) => {
+      const durationMinutes =
+        (new Date(a.endTime) - new Date(a.startTime)) / 60000;
+
+      return {
+        ...a,
+        durationMinutes,
+      };
+    });
+
+    res.json(data);
   } catch (error) {
     console.error("Get patient appointments error:", error);
     res.status(500).json({ message: "Server error" });
