@@ -22,7 +22,7 @@ const getSlots = async (req, res) => {
         .json({ message: "doctorId, branchId and date are required" });
     }
 
-    const requestedDay = new Date(`${date}T00:00:00Z`);
+    const requestedDay = new Date(`${date}T00:00:00.000Z`);
 
     const weekdayNames = [
       "SUNDAY",
@@ -36,7 +36,14 @@ const getSlots = async (req, res) => {
 
     const weekday = weekdayNames[requestedDay.getUTCDay()];
 
-    // Exception check
+    const startOfDay = new Date(requestedDay);
+    const endOfDay = new Date(requestedDay);
+    endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+
+    /* ---------------------------------- */
+    /* 1️⃣ Check schedule exception */
+    /* ---------------------------------- */
+
     const exception = await prisma.doctorScheduleException.findFirst({
       where: {
         doctorId,
@@ -48,6 +55,10 @@ const getSlots = async (req, res) => {
     if (exception && exception.isAvailable === false) {
       return res.json({ availabilityBlocks: [], slots: [] });
     }
+
+    /* ---------------------------------- */
+    /* 2️⃣ Fetch schedules */
+    /* ---------------------------------- */
 
     const schedules = await prisma.doctorSchedule.findMany({
       where: {
@@ -63,34 +74,10 @@ const getSlots = async (req, res) => {
       return res.json({ availabilityBlocks: [], slots: [] });
     }
 
-    const startOfDay = new Date(`${date}T00:00:00Z`);
-    const endOfDay = new Date(startOfDay);
-    endOfDay.setUTCDate(endOfDay.getUTCDate() + 1);
+    /* ---------------------------------- */
+    /* 3️⃣ Build availability blocks */
+    /* ---------------------------------- */
 
-    const appointments = await prisma.appointment.findMany({
-      where: {
-        doctorId,
-        branchId,
-        date: {
-          gte: startOfDay,
-          lt: endOfDay,
-        },
-        status: { not: "CANCELLED" },
-      },
-      include: { patient: true },
-    });
-
-    // Precompute appointment intervals
-    const appointmentIntervals = appointments.map((a) => ({
-      start: new Date(a.startTime),
-      end: new Date(a.endTime),
-      data: a,
-    }));
-
-    const now = new Date();
-    const showPast = includePast === "true";
-
-    const slots = [];
     const availabilityBlocks = [];
 
     for (const sch of schedules) {
@@ -108,55 +95,134 @@ const getSlots = async (req, res) => {
         startTime: blockStart.toISOString(),
         endTime: blockEnd.toISOString(),
       });
+    }
 
-      const slotLengthMs = (sch.slotMinutes || 30) * 60 * 1000;
+    /* ---------------------------------- */
+    /* 4️⃣ Ensure slots exist (generate if missing) */
+    /* ---------------------------------- */
 
-      let slotStart = new Date(blockStart);
+    const existingSlots = await prisma.slot.count({
+      where: {
+        doctorId,
+        branchId,
+        date: {
+          gte: startOfDay,
+          lt: endOfDay,
+        },
+      },
+    });
 
-      while (slotStart.getTime() + slotLengthMs <= blockEnd.getTime()) {
-        const slotEnd = new Date(slotStart.getTime() + slotLengthMs);
+    if (existingSlots === 0) {
+      const slotsToCreate = [];
 
-        if (!showPast && slotEnd <= now) {
-          slotStart = slotEnd;
-          continue;
+      for (const sch of schedules) {
+        const blockStart = setTimeOnDateUTC(
+          requestedDay,
+          new Date(sch.startTime),
+        );
+
+        const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
+
+        let cursor = new Date(blockStart);
+
+        while (cursor < blockEnd) {
+          const next = new Date(cursor);
+          next.setUTCMinutes(next.getUTCMinutes() + sch.slotMinutes);
+
+          if (next > blockEnd) break;
+
+          slotsToCreate.push({
+            doctorId,
+            branchId,
+            date: requestedDay,
+            startTime: new Date(cursor),
+            endTime: new Date(next),
+          });
+
+          cursor = next;
         }
+      }
 
-        let bookedAppt = null;
-
-        for (const appt of appointmentIntervals) {
-          if (appt.start < slotEnd && appt.end > slotStart) {
-            bookedAppt = appt.data;
-            break;
-          }
-        }
-
-        slots.push({
-          doctorId,
-          branchId,
-          date: isoDay(requestedDay),
-          startTime: slotStart.toISOString(),
-          endTime: slotEnd.toISOString(),
-          status: bookedAppt ? "BOOKED" : "AVAILABLE",
-          appointment: bookedAppt
-            ? {
-                id: bookedAppt.id,
-                patientId: bookedAppt.patientId,
-                patientName: bookedAppt.patient?.name || null,
-                status: bookedAppt.status,
-                startTime: bookedAppt.startTime,
-                endTime: bookedAppt.endTime,
-              }
-            : null,
+      if (slotsToCreate.length) {
+        await prisma.slot.createMany({
+          data: slotsToCreate,
+          skipDuplicates: true,
         });
-
-        slotStart = slotEnd;
       }
     }
 
-    res.json({ availabilityBlocks, slots });
+    /* ---------------------------------- */
+    /* 5️⃣ Fetch slots with appointments */
+    /* ---------------------------------- */
+
+    const slotRecords = await prisma.slot.findMany({
+      where: {
+        doctorId,
+        branchId,
+        date: {
+          gte: startOfDay,
+          lt: endOfDay,
+        },
+      },
+      orderBy: { startTime: "asc" },
+      include: {
+        appointmentSlots: {
+          include: {
+            appointment: {
+              include: {
+                patient: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const now = new Date();
+    const showPast = includePast === "true";
+
+    const slots = [];
+
+    for (const slot of slotRecords) {
+      const slotStart = new Date(slot.startTime);
+      const slotEnd = new Date(slot.endTime);
+
+      if (!showPast && slotEnd <= now) continue;
+
+      let bookedAppt = null;
+
+      if (slot.appointmentSlots.length) {
+        const appt = slot.appointmentSlots[0].appointment;
+
+        if (appt && appt.status !== "CANCELLED") {
+          bookedAppt = appt;
+        }
+      }
+
+      slots.push({
+        doctorId,
+        branchId,
+        date: requestedDay.toISOString(),
+        startTime: slotStart.toISOString(),
+        endTime: slotEnd.toISOString(),
+        status: bookedAppt ? "BOOKED" : "AVAILABLE",
+        appointment: bookedAppt
+          ? {
+              id: bookedAppt.id,
+              patientId: bookedAppt.patientId,
+              patientName: bookedAppt.patient?.name || null,
+              status: bookedAppt.status,
+              startTime: slotStart.toISOString(),
+              endTime: slotEnd.toISOString(),
+            }
+          : null,
+      });
+    }
+
+    return res.json({ availabilityBlocks, slots });
   } catch (error) {
     console.error("getSlots error:", error);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -197,18 +263,8 @@ const createAppointment = async (req, res) => {
         .json({ message: "Price is required for non-package appointment" });
     }
 
-    const requestedDay = new Date(`${date}T00:00:00Z`);
-
-    const exception = await prisma.doctorScheduleException.findFirst({
-      where: { doctorId, branchId, date: requestedDay },
-    });
-
-    if (exception && exception.isAvailable === false) {
-      return res
-        .status(400)
-        .json({ message: "Doctor is unavailable on this date" });
-    }
-
+    const requestedDay = new Date(date);
+    requestedDay.setUTCHours(0, 0, 0, 0);
     const weekdayNames = [
       "SUNDAY",
       "MONDAY",
@@ -236,21 +292,35 @@ const createAppointment = async (req, res) => {
         .json({ message: "Doctor has no schedule on that weekday" });
     }
 
-    // convert slotStarts to Date
-    const slots = slotStarts.map((s) => new Date(s)).sort((a, b) => a - b);
+    // Convert slots
+    const slotDates = slotStarts
+      .map((s) => {
+        const d = new Date(s);
+        if (isNaN(d)) {
+          throw new Error(`Invalid slot date: ${s}`);
+        }
+        return d;
+      })
+      .sort((a, b) => a - b);
 
-    const firstSlot = slots[0];
+    const firstSlot = slotDates[0];
 
     let selectedSchedule = null;
     let slotMinutes = 30;
 
     for (const sch of schedules) {
-      const blockStart = setTimeOnDateUTC(
-        requestedDay,
-        new Date(sch.startTime),
-      );
+      const blockStart = setTimeOnDateUTC(requestedDay, sch.startTime);
 
-      const blockEnd = setTimeOnDateUTC(requestedDay, new Date(sch.endTime));
+      const blockEnd = setTimeOnDateUTC(requestedDay, sch.endTime);
+
+      console.log({
+        firstSlot,
+        blockStart,
+        blockEnd,
+        firstSlotValid: !isNaN(firstSlot),
+        blockStartValid: !isNaN(blockStart),
+        blockEndValid: !isNaN(blockEnd),
+      });
 
       if (firstSlot >= blockStart && firstSlot < blockEnd) {
         selectedSchedule = sch;
@@ -265,14 +335,14 @@ const createAppointment = async (req, res) => {
         .json({ message: "Slots outside schedule availability" });
     }
 
-    // Validate slot alignment + consecutive slots
     const blockStart = setTimeOnDateUTC(
       requestedDay,
-      new Date(selectedSchedule.startTime),
+      selectedSchedule.startTime,
     );
 
-    for (let i = 0; i < slots.length; i++) {
-      const diff = (slots[i] - blockStart) / 60000;
+    // Validate alignment + consecutive
+    for (let i = 0; i < slotDates.length; i++) {
+      const diff = (slotDates[i] - blockStart) / 60000;
 
       if (diff % slotMinutes !== 0) {
         return res.status(400).json({
@@ -281,7 +351,7 @@ const createAppointment = async (req, res) => {
       }
 
       if (i > 0) {
-        const gap = (slots[i] - slots[i - 1]) / 60000;
+        const gap = (slotDates[i] - slotDates[i - 1]) / 60000;
 
         if (gap !== slotMinutes) {
           return res.status(400).json({
@@ -291,51 +361,78 @@ const createAppointment = async (req, res) => {
       }
     }
 
-    const start = slots[0];
-    const end = new Date(
-      slots[slots.length - 1].getTime() + slotMinutes * 60000,
-    );
-
-    const now = new Date();
-
-    if (end <= now) {
-      return res.status(400).json({ message: "Cannot book past time slot" });
-    }
-
-    // Check overlapping appointments
-    const overlapping = await prisma.appointment.findFirst({
+    // Fetch real slots from DB
+    const slots = await prisma.slot.findMany({
       where: {
         doctorId,
         branchId,
-        date: requestedDay,
-        status: { not: "CANCELLED" },
-        startTime: { lt: end },
-        endTime: { gt: start },
+        startTime: {
+          in: slotDates,
+        },
+      },
+      include: {
+        appointmentSlots: true,
       },
     });
 
-    if (overlapping) {
+    if (slots.length !== slotDates.length) {
+      return res.status(400).json({
+        message: "One or more slots not found",
+      });
+    }
+
+    // Check if already booked
+    const alreadyBooked = slots.find((s) => s.appointmentSlots.length > 0);
+
+    if (alreadyBooked) {
       return res.status(400).json({
         message: "One or more slots already booked",
       });
     }
 
-    const appointment = await prisma.appointment.create({
-      data: {
-        doctorId,
-        branchId,
-        patientId,
-        date: requestedDay,
-        startTime: start,
-        endTime: end,
-        packageId: packageId || null,
-        price: packageId ? null : Number(price),
-      },
+    const now = new Date();
+
+    const lastSlot = slots[slots.length - 1];
+
+    if (lastSlot.endTime <= now) {
+      return res.status(400).json({
+        message: "Cannot book past time slot",
+      });
+    }
+
+    // Create appointment with slots
+    const appointment = await prisma.$transaction(async (tx) => {
+      const appt = await tx.appointment.create({
+        data: {
+          doctorId,
+          branchId,
+          patientId,
+          date: requestedDay,
+          packageId: packageId || null,
+          price: packageId ? null : Number(price),
+        },
+      });
+
+      await tx.appointmentSlot.createMany({
+        data: slots.map((slot) => ({
+          appointmentId: appt.id,
+          slotId: slot.id,
+        })),
+      });
+
+      return appt;
     });
 
     res.status(201).json(appointment);
   } catch (error) {
     console.error("Create appointment error:", error);
+
+    if (error.code === "P2002") {
+      return res.status(400).json({
+        message: "One or more slots already booked",
+      });
+    }
+
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -540,7 +637,6 @@ const getAppointments = async (req, res) => {
     if (status) where.status = status;
     if (patientId) where.patientId = patientId;
 
-    // Date range
     if (from || to) {
       const dateFilter = {};
 
@@ -555,7 +651,6 @@ const getAppointments = async (req, res) => {
       where.date = dateFilter;
     }
 
-    // Search patient
     if (search) {
       where.patient = {
         name: {
@@ -565,8 +660,7 @@ const getAppointments = async (req, res) => {
       };
     }
 
-    // Safe sorting
-    const allowedSort = ["createdAt", "date", "startTime", "status"];
+    const allowedSort = ["createdAt", "date", "status"];
     if (!allowedSort.includes(sortBy)) sortBy = "createdAt";
 
     const [appointments, total] = await Promise.all([
@@ -583,23 +677,21 @@ const getAppointments = async (req, res) => {
           package: {
             select: {
               id: true,
-              package: {
-                select: { name: true },
-              },
+              package: { select: { name: true } },
             },
           },
 
           transaction: {
-            select: {
-              id: true,
-              amount: true,
-            },
+            select: { id: true, amount: true },
           },
 
           medicalRecord: {
-            select: {
-              id: true,
-              diagnosis: true,
+            select: { id: true, diagnosis: true },
+          },
+
+          slots: {
+            include: {
+              slot: true,
             },
           },
         },
@@ -616,11 +708,22 @@ const getAppointments = async (req, res) => {
     ]);
 
     const data = appointments.map((a) => {
+      const sortedSlots = a.slots
+        .map((s) => s.slot)
+        .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+      const startTime = sortedSlots[0]?.startTime || null;
+      const endTime = sortedSlots[sortedSlots.length - 1]?.endTime || null;
+
       const durationMinutes =
-        (new Date(a.endTime) - new Date(a.startTime)) / 60000;
+        startTime && endTime
+          ? (new Date(endTime) - new Date(startTime)) / 60000
+          : 0;
 
       return {
         ...a,
+        startTime,
+        endTime,
         durationMinutes,
       };
     });
@@ -722,6 +825,12 @@ const getAppointmentById = async (req, res) => {
             },
           },
         },
+
+        slots: {
+          include: {
+            slot: true,
+          },
+        },
       },
     });
 
@@ -740,11 +849,22 @@ const getAppointmentById = async (req, res) => {
       return res.status(403).json({ message: "Forbidden" });
     }
 
+    const sortedSlots = appointment.slots
+      .map((s) => s.slot)
+      .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+    const startTime = sortedSlots[0]?.startTime || null;
+    const endTime = sortedSlots[sortedSlots.length - 1]?.endTime || null;
+
     const durationMinutes =
-      (new Date(appointment.endTime) - new Date(appointment.startTime)) / 60000;
+      startTime && endTime
+        ? (new Date(endTime) - new Date(startTime)) / 60000
+        : 0;
 
     res.json({
       ...appointment,
+      startTime,
+      endTime,
       durationMinutes,
     });
   } catch (error) {
@@ -841,6 +961,7 @@ const deleteAppointment = async (req, res) => {
       where: { id },
       include: {
         transaction: true,
+        slots: true, // AppointmentSlot[]
       },
     });
 
@@ -855,15 +976,23 @@ const deleteAppointment = async (req, res) => {
       });
     }
 
-    // Optional safety check (if transaction exists)
+    // Prevent deleting paid appointments
     if (appointment.transaction) {
       return res.status(400).json({
         message: "Cannot delete appointment with transaction",
       });
     }
 
-    await prisma.appointment.delete({
-      where: { id },
+    await prisma.$transaction(async (tx) => {
+      // Remove slot links
+      await tx.appointmentSlot.deleteMany({
+        where: { appointmentId: id },
+      });
+
+      // Delete appointment
+      await tx.appointment.delete({
+        where: { id },
+      });
     });
 
     res.json({ message: "Appointment deleted successfully" });

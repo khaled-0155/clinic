@@ -223,12 +223,26 @@ exports.getAppointmentsWidget = async (req, res) => {
       select: {
         id: true,
         date: true,
-        startTime: true,
         status: true,
         patient: { select: { name: true } },
         doctor: { select: { name: true } },
+        slots: {
+          select: {
+            slot: {
+              select: {
+                startTime: true,
+              },
+            },
+          },
+          orderBy: {
+            slot: {
+              startTime: "asc",
+            },
+          },
+          take: 1,
+        },
       },
-      orderBy: { startTime: "asc" },
+      orderBy: { date: "asc" },
     });
 
     const grouped = {};
@@ -238,11 +252,13 @@ exports.getAppointmentsWidget = async (req, res) => {
 
       if (!grouped[day]) grouped[day] = [];
 
+      const startTime = a.slots?.[0]?.slot?.startTime;
+
       grouped[day].push({
         id: a.id,
         patient: a.patient?.name,
         doctor: a.doctor?.name,
-        startTime: dayjs(a.startTime).format("HH:mm"),
+        startTime: startTime ? dayjs(startTime).format("HH:mm") : null,
         status: a.status,
       });
     });
