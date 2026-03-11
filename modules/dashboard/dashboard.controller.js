@@ -224,44 +224,44 @@ exports.getAppointmentsWidget = async (req, res) => {
         id: true,
         date: true,
         status: true,
+
         patient: { select: { name: true } },
         doctor: { select: { name: true } },
+
         slots: {
-          select: {
-            slot: {
-              select: {
-                startTime: true,
-              },
-            },
+          include: {
+            slot: true,
           },
-          orderBy: {
-            slot: {
-              startTime: "asc",
-            },
-          },
-          take: 1,
         },
       },
-      orderBy: { date: "asc" },
+      orderBy: {
+        date: "asc",
+      },
     });
 
     const grouped = {};
 
-    appointments.forEach((a) => {
+    for (const a of appointments) {
       const day = dayjs(a.date).format("YYYY-MM-DD");
 
       if (!grouped[day]) grouped[day] = [];
 
-      const startTime = a.slots?.[0]?.slot?.startTime;
+      const sortedSlots = a.slots
+        .map((s) => s.slot)
+        .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+      const startTime = sortedSlots[0]?.startTime || null;
+      const endTime = sortedSlots[sortedSlots.length - 1]?.endTime || null;
 
       grouped[day].push({
         id: a.id,
-        patient: a.patient?.name,
-        doctor: a.doctor?.name,
+        patient: a.patient?.name || null,
+        doctor: a.doctor?.name || null,
         startTime: startTime ? dayjs(startTime).format("HH:mm") : null,
+        endTime: endTime ? dayjs(endTime).format("HH:mm") : null,
         status: a.status,
       });
-    });
+    }
 
     res.json(grouped);
   } catch (error) {
@@ -269,7 +269,6 @@ exports.getAppointmentsWidget = async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 };
-
 exports.getRecentTransactions = async (req, res) => {
   try {
     const transactions = await prisma.transaction.findMany({
